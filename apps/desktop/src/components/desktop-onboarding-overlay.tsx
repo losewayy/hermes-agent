@@ -41,7 +41,7 @@ import {
   startProviderOAuth,
   submitOnboardingCode
 } from '@/store/onboarding'
-import type { OAuthProvider } from '@/types/hermes'
+import type { ModelOptionProvider, OAuthProvider } from '@/types/hermes'
 
 interface DesktopOnboardingOverlayProps {
   enabled: boolean
@@ -102,6 +102,74 @@ const API_KEY_OPTIONS: ApiKeyOption[] = [
     placeholder: 'http://127.0.0.1:8000/v1'
   }
 ]
+
+// Build the FULL API-key provider catalog from the backend model options so the
+// onboarding / Providers key form lists every `api_key` provider `hermes model`
+// knows about — not just the hand-curated five. Curated entries keep their
+// richer copy + placeholders and float to the top (recommended defaults); every
+// other api_key provider is appended with a generic "paste {KEY}" affordance.
+// OAuth / external providers are intentionally excluded here — they go through
+// the OAuth picker / sign-in flow, not a pasted key.
+function useApiKeyCatalog(): ApiKeyOption[] {
+  const [rows, setRows] = useState<ModelOptionProvider[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+
+    // Best-effort — on failure the curated defaults still render. Wrapped in
+    // Promise.resolve().then so a synchronous throw (e.g. no desktop bridge in
+    // tests) is funneled into the same .catch instead of escaping.
+    void Promise.resolve()
+      .then(() => getGlobalModelOptions())
+      .then(res => {
+        if (!cancelled) {
+          setRows(res.providers ?? [])
+        }
+      })
+      .catch(() => {
+        // Ignore — fall back to the curated API_KEY_OPTIONS only.
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  return useMemo(() => {
+    const curatedByEnv = new Map(API_KEY_OPTIONS.map(o => [o.envKey, o]))
+    const derived: ApiKeyOption[] = []
+    const seenEnv = new Set<string>(API_KEY_OPTIONS.map(o => o.envKey))
+
+    for (const row of rows) {
+      // Only api_key providers can be activated with a pasted key. Skip OAuth /
+      // external / managed flows and anything missing an env var to write to.
+      if (row.auth_type && row.auth_type !== 'api_key') {
+        continue
+      }
+
+      const envKey = row.key_env
+
+      if (!envKey || seenEnv.has(envKey)) {
+        continue
+      }
+
+      seenEnv.add(envKey)
+      derived.push({
+        id: row.slug,
+        name: row.name,
+        envKey,
+        description: `Direct API access to ${row.name}.`,
+        docsUrl: ''
+      })
+    }
+
+    // Curated first (recommended order), then the rest alphabetically so the
+    // long tail is scannable.
+    derived.sort((a, b) => a.name.localeCompare(b.name))
+
+    return [...API_KEY_OPTIONS.filter(o => curatedByEnv.has(o.envKey)), ...derived]
+  }, [rows])
+}
 
 const PROVIDER_DISPLAY: Record<string, { order: number; title: string }> = {
   nous: { order: 0, title: 'Nous Portal' },
@@ -308,6 +376,7 @@ export function Picker({ ctx }: { ctx: OnboardingContext }) {
   const [showAll, setShowAll] = useState(readShowAll)
   const ordered = useMemo(() => (providers ? sortProviders(providers) : []), [providers])
   const hasOauth = ordered.length > 0
+  const apiKeyOptions = useApiKeyCatalog()
 
   if (mode === 'apikey' || !hasOauth) {
     return (
@@ -315,6 +384,7 @@ export function Picker({ ctx }: { ctx: OnboardingContext }) {
         canGoBack={hasOauth}
         onBack={() => setOnboardingMode('oauth')}
         onSave={(envKey, value, name) => saveOnboardingApiKey(envKey, value, name, ctx)}
+        options={apiKeyOptions}
       />
     )
   }
